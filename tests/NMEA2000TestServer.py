@@ -31,8 +31,15 @@ class NMEA2000TestServer:
         self.type = type
         self.server = None
         self.clients: List[asyncio.StreamWriter] = []
+        self.client_tasks = set()
+        self.broadcast_task = None
         self.running = False
         self.encoder = NMEA2000Encoder()
+
+    def _track_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        task = asyncio.create_task(self.handle_client(reader, writer))
+        self.client_tasks.add(task)
+        task.add_done_callback(self.client_tasks.discard)
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handle a new client connection."""
@@ -204,15 +211,16 @@ class NMEA2000TestServer:
         """Start the test server."""
         self.running = True
         self.server = await asyncio.start_server(
-            self.handle_client, self.host, self.port
+            self._track_client, self.host, self.port
         )
 
         addr = self.server.sockets[0].getsockname()
+        self.port = addr[1]
         logger.info(f'NMEA2000 Test Server running on {addr}')
 
     def start_broadcast(self):
         # Start broadcasting test messages
-        asyncio.create_task(self.broadcast_test_messages())
+        self.broadcast_task = asyncio.create_task(self.broadcast_test_messages())
 
     async def wait(self):
         assert self.server is not None
@@ -234,6 +242,17 @@ class NMEA2000TestServer:
             except Exception:
                 pass
         self.clients = []
+
+        if self.broadcast_task is not None:
+            self.broadcast_task.cancel()
+            await asyncio.gather(self.broadcast_task, return_exceptions=True)
+            self.broadcast_task = None
+
+        if self.client_tasks:
+            tasks = tuple(self.client_tasks)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         logger.info("Server stopped")
 
 

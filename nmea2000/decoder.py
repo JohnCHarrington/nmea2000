@@ -1,4 +1,6 @@
 """NMEA2000 Decoder module to decode NMEA2000 messages from various input formats."""
+from __future__ import annotations
+
 import logging
 import binascii
 import os

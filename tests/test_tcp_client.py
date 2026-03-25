@@ -15,7 +15,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("test_tcp_client")
 
-def _create_server_client(type: Type):
+async def _create_server_client(type: Type):
     # Create a queue and a signal
     receive_queue = asyncio.Queue()
     receive_signal = asyncio.Event()
@@ -31,23 +31,33 @@ def _create_server_client(type: Type):
         """Callback function for status changes."""
         print(f"Connection status: {state}")
 
-    server = NMEA2000TestServer("127.0.0.1", 8881, type)
+    server = NMEA2000TestServer("127.0.0.1", 0, type)
+    await server.start()
+    port = server.port
     if type == Type.EBYTE:
-        client = EByteNmea2000Gateway("127.0.0.1", 8881)
+        client = EByteNmea2000Gateway("127.0.0.1", port)
     elif type == Type.ACTISENSE:
-        client = ActisenseNmea2000Gateway("127.0.0.1", 8881)            
+        client = ActisenseNmea2000Gateway("127.0.0.1", port)
     elif type == Type.YACHT_DEVICES:
-        client = YachtDevicesNmea2000Gateway("127.0.0.1", 8881)            
+        client = YachtDevicesNmea2000Gateway("127.0.0.1", port)
     client.set_receive_callback(handle_received_message)
     client.set_status_callback(handle_status_change)
 
     return server, client, receive_signal, receive_queue
 
+
+async def _wait_for_server_client(server: NMEA2000TestServer):
+    for _ in range(20):
+        if server.clients:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("Timed out waiting for client connection on test server")
+
 @pytest.mark.asyncio
 async def test_single_message_EBYTE():
-    server,client, receive_signal, receive_queue = _create_server_client(Type.EBYTE)
-    await server.start()
+    server,client, receive_signal, receive_queue = await _create_server_client(Type.EBYTE)
     await client.connect()
+    await _wait_for_server_client(server)
     
     # Wait for the signal that a message was received
     try:
@@ -64,9 +74,9 @@ async def test_single_message_EBYTE():
 
 @pytest.mark.asyncio
 async def test_single_message_ACTISENSE_1():
-    server,client, receive_signal, receive_queue = _create_server_client(Type.ACTISENSE)
-    await server.start()
+    server,client, receive_signal, receive_queue = await _create_server_client(Type.ACTISENSE)
     await client.connect()
+    await _wait_for_server_client(server)
     
     # Wait for the signal that a message was received
     try:
@@ -82,9 +92,9 @@ async def test_single_message_ACTISENSE_1():
 
 @pytest.mark.asyncio
 async def test_single_message_ACTISENSE_2():
-    server,client, receive_signal, receive_queue = _create_server_client(Type.ACTISENSE)
-    await server.start()
+    server,client, receive_signal, receive_queue = await _create_server_client(Type.ACTISENSE)
     await client.connect()
+    await _wait_for_server_client(server)
     
     # Wait for the signal that a message was received
     try:
@@ -100,9 +110,9 @@ async def test_single_message_ACTISENSE_2():
 
 @pytest.mark.asyncio
 async def test_single_message_YACHT_DEVICES():
-    server,client, receive_signal, receive_queue = _create_server_client(Type.YACHT_DEVICES)
-    await server.start()
+    server,client, receive_signal, receive_queue = await _create_server_client(Type.YACHT_DEVICES)
     await client.connect()
+    await _wait_for_server_client(server)
     
     # Wait for the signal that a message was received
     try:

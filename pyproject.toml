@@ -7,16 +7,15 @@ name = "nmea2000"
 version = "2026.3.4"
 description = "NMEA 2000 encoder and decoder"
 readme = "README.md"
-license = "Apache-2.0"
 authors = [
     { name = "Tomer-w" },
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.8"
 dependencies = [
     "orjson>=3.10,<4.0",
     "pyserial-asyncio>=0.6",
     "tenacity>=9.0.0",
-    "python-can>=4.6.0",
+    "python-can==4.5.0",
 ]
 
 [project.optional-dependencies]

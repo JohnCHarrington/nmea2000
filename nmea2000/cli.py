@@ -3,7 +3,10 @@ import asyncio
 import sys
 import logging
 
-import can.cli
+try:
+    import can.cli as can_cli
+except ModuleNotFoundError:
+    can_cli = None
 
 from .message import NMEA2000Message
 from .ioclient import ActisenseNmea2000Gateway, AsyncIOClient, EByteNmea2000Gateway, State, Type, WaveShareNmea2000Gateway, YachtDevicesNmea2000Gateway, PythonCanAsyncIOClient
@@ -11,6 +14,11 @@ from .decoder import NMEA2000Decoder
 from .encoder import NMEA2000Encoder
 
 logger = logging.getLogger(__name__)
+
+
+async def _read_stdin_line() -> str:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, sys.stdin.readline)
 
 # Define receive callback as a standalone function
 async def handle_received_message(message: NMEA2000Message):
@@ -36,27 +44,50 @@ async def interactive_client(client: AsyncIOClient, json_output: bool = False):
     print("Connected to NMEA2000 gateway. Enter NMEA2000 messages in JSON format.")
     print("Type 'exit' to quit.")
 
-    try:
+    stdin_lines_processed = 0
+
+    async def read_stdin():
+        nonlocal stdin_lines_processed
         while True:
-            line = await asyncio.to_thread(sys.stdin.readline)
+            line = await _read_stdin_line()
             if not line:
-                break
-                
+                return
+
+            stdin_lines_processed += 1
             line = line.strip()
             if line.lower() == "exit":
-                break
-            else:
-                try:
-                    message = NMEA2000Message.from_json(line)
-                    await client.send(message)
-                except Exception as e:
-                    print(f"Error: {e}")
-                    print("Not valid NMEA2000Message json")
-                    continue
+                return
+
+            try:
+                message = NMEA2000Message.from_json(line)
+                await client.send(message)
+            except Exception as e:
+                print(f"Error: {e}")
+                print("Not valid NMEA2000Message json")
+
+    try:
+        stdin_task = asyncio.create_task(read_stdin())
+        if sys.stdin.isatty():
+            await stdin_task
+        else:
+            while True:
+                if stdin_task.done():
+                    stdin_task.result()
+                    if stdin_lines_processed > 0:
+                        break
+                await asyncio.sleep(0.1)
+                if client.state == State.CLOSED:
+                    break
     except KeyboardInterrupt:
         sys.stdout.flush()
-        pass
     finally:
+        if 'stdin_task' in locals() and not stdin_task.done():
+            stdin_task.cancel()
+            try:
+                await stdin_task
+            except asyncio.CancelledError:
+                pass
+        sys.stdout.flush()
         await client.close()
         print("Connection closed.")
 
@@ -196,7 +227,13 @@ async def async_main():
         "--dump_pgns", type=str, help="Record only specific pgns, comma seperated")
     python_can_client_parser.add_argument(
         "--json", action="store_true", help="Output received messages as JSON, one per line")
-    can.cli.add_bus_arguments(python_can_client_parser)
+    if can_cli is not None:
+        can_cli.add_bus_arguments(python_can_client_parser)
+    else:
+        python_can_client_parser.add_argument(
+            "--interface", type=str, required=True, help="python-can interface name")
+        python_can_client_parser.add_argument(
+            "--channel", type=str, required=True, help="python-can channel name")
 
     # Parse arguments
     args = parser.parse_args()

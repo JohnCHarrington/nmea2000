@@ -1,10 +1,11 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 import socket
 from enum import Enum
-from typing import Callable, Awaitable, Optional, Sequence
+from typing import Awaitable, Callable, Optional, Sequence, Union
 import serial_asyncio
-import can.cli
 import can.interface
 import can.message
 from tenacity import stop_never, wait_exponential, retry_if_exception_type
@@ -17,7 +18,7 @@ from .decoder import NMEA2000Decoder, InvalidFrameError
 from .encoder import NMEA2000Encoder
 from .message import NMEA2000Message
 
-EncodedMessage = bytes | can.message.Message
+EncodedMessage = Union[bytes, can.message.Message]
 
 class State(Enum):
     """Connection states for NMEA2000 clients.
@@ -76,6 +77,24 @@ class AsyncIOClient(ABC):
     def _should_reconnect_on_send_error(self, error: Exception) -> bool:
         """Whether a send failure should trigger reconnect handling."""
         return True
+
+    def _configure_keepalive(self, sock):
+        """Enable TCP keepalive using whichever socket options the platform exposes."""
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
+        idle_option = getattr(socket, "TCP_KEEPIDLE", None)
+        if idle_option is None:
+            idle_option = getattr(socket, "TCP_KEEPALIVE", None)
+        if idle_option is not None:
+            sock.setsockopt(socket.IPPROTO_TCP, idle_option, 30)
+
+        interval_option = getattr(socket, "TCP_KEEPINTVL", None)
+        if interval_option is not None:
+            sock.setsockopt(socket.IPPROTO_TCP, interval_option, 10)
+
+        count_option = getattr(socket, "TCP_KEEPCNT", None)
+        if count_option is not None:
+            sock.setsockopt(socket.IPPROTO_TCP, count_option, 5)
 
     def __init__(self, 
                  exclude_pgns:list[int | str], 
@@ -398,10 +417,7 @@ class EByteNmea2000Gateway(AsyncIOClient):
         # Get the underlying socket
         sock = self.writer.get_extra_info("socket")
         if sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)  # Enable keepalive
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)  # Idle time before keepalive probes (Linux/macOS)
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)  # Interval between keepalive probes
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)  # Number of failed probes before dropping connection
+            self._configure_keepalive(sock)
         self.logger.info(f"Connected to {self.host}:{self.port}")
 
     async def _receive_impl(self):
@@ -493,10 +509,7 @@ class TextNmea2000Gateway(AsyncIOClient):
         # Get the underlying socket
         sock = self.writer.get_extra_info("socket")
         if sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)  # Enable keepalive
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 30)  # Idle time before keepalive probes (Linux/macOS)
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10)  # Interval between keepalive probes
-            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 5)  # Number of failed probes before dropping connection
+            self._configure_keepalive(sock)
         self.logger.info(f"Connected to {self.host}:{self.port}")
 
     async def _receive_impl(self):
@@ -868,6 +881,10 @@ class PythonCanAsyncIOClient(AsyncIOClient):
                 bus.send(encoded_message, timeout=self.send_timeout)
                 return
             except can.CanOperationError as error:
+                if not self._should_reconnect_on_send_error(error) or attempt == attempts:
+                    self.logger.error("Failed to send message after %s attempts. Error: %s", attempt, error, exc_info=True)
+                    break
+
                 self.logger.warning(
                     "python-can transmit queue full, retrying send (%s/%s) in %.2fs",
                     attempt,
