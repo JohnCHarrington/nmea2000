@@ -6,9 +6,145 @@ import can.message
 from .decoder import NMEA2000Decoder
 from .message import NMEA2000Message
 from . import pgns as pgns_module
-from .utils import calculate_canbus_checksum
+from .utils import calculate_canbus_checksum, encode_number, encode_string_fix
 
 logger = logging.getLogger(__name__)
+
+
+def _get_int_field_value(
+    nmea200_message: NMEA2000Message,
+    field_id: str,
+    *,
+    lookup: Callable[[str], int] | None = None,
+    default: int | None = None,
+) -> int:
+    field = nmea200_message.get_field_by_id(field_id)
+    if isinstance(field.raw_value, int):
+        return field.raw_value
+    if isinstance(field.value, int):
+        return field.value
+    if isinstance(field.value, float):
+        return int(field.value)
+    if isinstance(field.value, str) and lookup is not None:
+        return lookup(field.value)
+    if field.value is None and default is not None:
+        return default
+    raise ValueError(f"Cant encode this message, missing '{field_id}'")
+
+
+def _get_text_field_value(nmea200_message: NMEA2000Message, field_id: str) -> str:
+    field = nmea200_message.get_field_by_id(field_id)
+    if isinstance(field.raw_value, str):
+        return field.raw_value
+    if isinstance(field.value, str):
+        return field.value
+    if field.value is None:
+        return ""
+    raise ValueError(f"Cant encode this message, '{field_id}' must be a string")
+
+
+def _get_numeric_field_value(nmea200_message: NMEA2000Message, field_id: str) -> float:
+    field = nmea200_message.get_field_by_id(field_id)
+    if isinstance(field.value, (int, float)):
+        return float(field.value)
+    if isinstance(field.raw_value, (int, float)):
+        return float(field.raw_value)
+    raise ValueError(f"Cant encode this message, '{field_id}' must be numeric")
+
+
+def _encode_string_lau(value: str) -> bytes:
+    if value == "":
+        return bytes([2, 1])
+
+    try:
+        payload = value.encode("ascii")
+        encoding_flag = 1
+    except UnicodeEncodeError:
+        payload = value.encode("utf-16-le")
+        encoding_flag = 0
+
+    length = len(payload) + 2
+    if length > 255:
+        raise ValueError("STRING_LAU value is too long")
+    return bytes([length, encoding_flag]) + payload
+
+
+def _extract_raw_payload_bytes(raw_can_data: bytes | str | None) -> bytes | None:
+    if isinstance(raw_can_data, bytes):
+        return bytes(raw_can_data)
+    if isinstance(raw_can_data, str):
+        parts = raw_can_data.split(",")
+        if len(parts) >= 7:
+            try:
+                return bytes(int(byte, 16) for byte in parts[6:])
+            except ValueError:
+                return None
+    return None
+
+
+def _encode_pgn_60928_manual(nmea200_message: NMEA2000Message) -> bytes:
+    data_raw = 0
+    data_raw |= encode_number(_get_int_field_value(nmea200_message, "uniqueNumber"), 21, False, 1) << 0
+    data_raw |= _get_int_field_value(
+        nmea200_message,
+        "manufacturerCode",
+        lookup=pgns_module.lookup_encode_MANUFACTURER_CODE,
+    ) << 21
+    data_raw |= encode_number(_get_int_field_value(nmea200_message, "deviceInstanceLower"), 3, False, 1) << 32
+    data_raw |= encode_number(_get_int_field_value(nmea200_message, "deviceInstanceUpper"), 5, False, 1) << 35
+    data_raw |= _get_int_field_value(nmea200_message, "deviceFunction") << 40
+    data_raw |= _get_int_field_value(nmea200_message, "spare", default=1) << 48
+    data_raw |= encode_number(_get_int_field_value(nmea200_message, "deviceClass"), 7, False, 1) << 49
+    data_raw |= encode_number(_get_int_field_value(nmea200_message, "systemInstance"), 4, False, 1) << 56
+    data_raw |= _get_int_field_value(
+        nmea200_message,
+        "industryGroup",
+        lookup=pgns_module.lookup_encode_INDUSTRY_CODE,
+    ) << 60
+    data_raw |= _get_int_field_value(
+        nmea200_message,
+        "arbitraryAddressCapable",
+        lookup=pgns_module.lookup_encode_YES_NO,
+    ) << 63
+    return data_raw.to_bytes(8, byteorder="little")
+
+
+def _encode_pgn_126996_manual(nmea200_message: NMEA2000Message) -> bytes:
+    raw_payload = _extract_raw_payload_bytes(nmea200_message.raw_can_data)
+    if raw_payload is not None and len(raw_payload) == 134:
+        return raw_payload
+
+    data_raw = 0
+    data_raw |= encode_number(_get_numeric_field_value(nmea200_message, "nmea2000Version"), 16, False, 0.001) << 0
+    data_raw |= encode_number(_get_numeric_field_value(nmea200_message, "productCode"), 16, False, 1) << 16
+    data_raw |= encode_string_fix(_get_text_field_value(nmea200_message, "modelId"), 256) << 32
+    data_raw |= encode_string_fix(_get_text_field_value(nmea200_message, "softwareVersionCode"), 256) << 288
+    data_raw |= encode_string_fix(_get_text_field_value(nmea200_message, "modelVersion"), 256) << 544
+    data_raw |= encode_string_fix(_get_text_field_value(nmea200_message, "modelSerialCode"), 256) << 800
+    data_raw |= _get_int_field_value(nmea200_message, "certificationLevel", default=0) << 1056
+    data_raw |= encode_number(_get_int_field_value(nmea200_message, "loadEquivalency"), 8, False, 1) << 1064
+    return data_raw.to_bytes(134, byteorder="little")
+
+
+def _encode_pgn_126998_manual(nmea200_message: NMEA2000Message) -> bytes:
+    raw_payload = _extract_raw_payload_bytes(nmea200_message.raw_can_data)
+    if raw_payload is not None:
+        return raw_payload
+
+    return b"".join(
+        [
+            _encode_string_lau(_get_text_field_value(nmea200_message, "installationDescription1")),
+            _encode_string_lau(_get_text_field_value(nmea200_message, "installationDescription2")),
+            _encode_string_lau(_get_text_field_value(nmea200_message, "manufacturerInformation")),
+        ]
+    )
+
+
+MANUAL_ENCODERS: dict[int, Callable[[NMEA2000Message], bytes]] = {
+    60928: _encode_pgn_60928_manual,
+    126996: _encode_pgn_126996_manual,
+    126998: _encode_pgn_126998_manual,
+}
 
 class NMEA2000Encoder:
     """NMEA 2000 Encoder Class"""
@@ -17,6 +153,13 @@ class NMEA2000Encoder:
         self.sequence_counter = 0
 
     def _call_encode_function(self, nmea200_message: NMEA2000Message) -> bytes:
+        manual_encoder = MANUAL_ENCODERS.get(nmea200_message.PGN)
+        if manual_encoder is not None:
+            try:
+                return manual_encoder(nmea200_message)
+            except Exception as e:
+                raise ValueError(e) from e
+
         encode_func_name = f'encode_pgn_{nmea200_message.PGN}'
         encode_func: Callable[[NMEA2000Message], bytes] | None = getattr(pgns_module, encode_func_name, None)
 
