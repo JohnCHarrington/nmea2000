@@ -892,7 +892,7 @@ class PythonCanAsyncIOClient(AsyncIOClient):
                 if not self._is_transient_send_error(error) or attempt == attempts:
                     raise
 
-                self.logger.warning(
+                self.logger.debug(
                     "python-can transmit queue full, retrying send (%s/%s) in %.2fs",
                     attempt,
                     attempts,
